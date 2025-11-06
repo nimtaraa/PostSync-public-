@@ -1,12 +1,14 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import axios from "axios";
 
-// ✅ Use OpenID Connect Scopes (the ones your app supports)
+const LINKEDIN_CLIENT_ID = import.meta.env.VITE_LINKEDIN_CLIENT_ID;
+const REDIRECT_URI = import.meta.env.VITE_LINKEDIN_REDIRECT_URI; // Must match exactly with LinkedIn App settings
 
 interface User {
   id: string;
   name: string;
   email: string;
+  picture?: string;
   accessToken: string;
 }
 
@@ -18,8 +20,6 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-const LINKEDIN_CLIENT_ID = import.meta.env.VITE_LINKEDIN_CLIENT_ID;
-const REDIRECT_URI = import.meta.env.VITE_LINKEDIN_REDIRECT_URI;
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
@@ -27,24 +27,38 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   useEffect(() => {
     const storedUser = localStorage.getItem("linkedin_user");
-    if (storedUser) setUser(JSON.parse(storedUser));
+    if (storedUser) {
+      setUser(JSON.parse(storedUser));
+      setLoading(false);
+      return;
+    }
 
+    // Run LinkedIn callback logic only once per session
     if (window.location.pathname === "/auth/callback") {
-      handleLinkedInCallback();
+      const hasRun = sessionStorage.getItem("linkedin_callback_handled");
+      if (!hasRun) {
+        sessionStorage.setItem("linkedin_callback_handled", "true");
+        handleLinkedInCallback();
+      } else {
+        console.log("⚠️ Skipping duplicate callback handling");
+        setLoading(false);
+      }
     } else {
       setLoading(false);
     }
   }, []);
 
   const signInWithLinkedIn = () => {
+    // Reset callback guard before new login attempt
+    sessionStorage.removeItem("linkedin_callback_handled");
+
     const state = crypto.randomUUID();
     localStorage.setItem("linkedin_state", state);
 
-    const scope = "openid profile email"; // ✅ FIXED SCOPES
-
+    const scope = "openid profile email w_member_social";
     const authUrl = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${LINKEDIN_CLIENT_ID}&redirect_uri=${encodeURIComponent(
       REDIRECT_URI
-    )}&scope=${encodeURIComponent(scope)}&state=${state}&prompt=login`;
+    )}&scope=${encodeURIComponent(scope)}&state=${state}`;
 
     window.location.href = authUrl;
   };
@@ -68,41 +82,44 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
     const savedState = localStorage.getItem("linkedin_state");
     if (state !== savedState) {
-      console.error("Invalid OAuth state");
+      console.error("❌ Invalid OAuth state");
       setLoading(false);
       return;
     }
 
     try {
-      // ✅ Exchange the code for a token in your backend
-      const response = await axios.post(
+      console.log("🔹 Exchanging code for token...");
+      const tokenResponse = await axios.post(
         `${import.meta.env.VITE_BACKEND_URL}/auth/linkedin/token`,
         { code, redirect_uri: REDIRECT_URI }
       );
 
-      const id_token = response.data.id_token; // ✅ OpenID Connect gives ID token
-      if (!id_token) throw new Error("No ID token returned");
+      const access_token = tokenResponse.data.access_token;
+      if (!access_token) throw new Error("No access token returned");
 
-      // ✅ Decode JWT to extract user info (simplified)
-      const base64Url = id_token.split(".")[1];
-      const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
-      const userPayload = JSON.parse(window.atob(base64));
+      console.log("✅ Token received. Fetching user info...");
+      const userInfo = await axios.get(
+        `${import.meta.env.VITE_BACKEND_URL}/auth/linkedin/me`,
+        { headers: { Authorization: `Bearer ${access_token}` } }
+      );
 
       const userData: User = {
-        id: userPayload.sub,
-        name: userPayload.name,
-        email: userPayload.email,
-        accessToken: id_token,
+        id: userInfo.data.sub || userInfo.data.id,
+        name: userInfo.data.name,
+        email: userInfo.data.email,
+        picture: userInfo.data.picture,
+        accessToken: access_token,
       };
 
       setUser(userData);
       localStorage.setItem("linkedin_user", JSON.stringify(userData));
       localStorage.removeItem("linkedin_state");
 
-      // ✅ Redirect to dashboard
+      // Replace history to remove ?code=... from URL
       window.history.replaceState({}, document.title, "/dashboard");
-    } catch (err) {
-      console.error("LinkedIn login error:", err);
+    } catch (err: any) {
+      console.error("❌ LinkedIn login error:", err.response?.data || err.message);
+      alert("Login failed. Check console for details.");
     } finally {
       setLoading(false);
     }
@@ -111,6 +128,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const signOut = () => {
     setUser(null);
     localStorage.removeItem("linkedin_user");
+    sessionStorage.removeItem("linkedin_callback_handled");
   };
 
   return (

@@ -1,83 +1,100 @@
+import json
 import os
 import requests
 from fastapi import APIRouter, HTTPException, Header
 
+from app.services.Linkedin_credentials import set_credentials
 
 router = APIRouter(prefix="/auth/linkedin", tags=["LinkedIn OAuth"])
+
+# === LinkedIn App Config ===
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
 LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
 
+REDIRECT_URI = "http://localhost:5173/auth/callback"
+
+TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
+
+
+# === Step 1: Exchange Code for Access Token ===
 @router.post("/token")
 def get_access_token(data: dict):
     code = data.get("code")
-    redirect_uri = data.get("redirect_uri")
+    redirect_uri = data.get("redirect_uri") or REDIRECT_URI
 
-    print("redirect uri received:", redirect_uri)
+    print("\n=================== LINKEDIN TOKEN DEBUG ===================")
+    print(f"Received code: {code}")
+    print(f"Received redirect_uri: {redirect_uri}")
+    print("============================================================\n")
 
-    if not code or not redirect_uri:
-        raise HTTPException(status_code=400, detail="Missing code or redirect_uri")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
 
-    token_url = "https://www.linkedin.com/oauth/v2/accessToken"
     payload = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": REDIRECT_URI,  # must EXACTLY match the one in LinkedIn settings
         "client_id": LINKEDIN_CLIENT_ID,
         "client_secret": LINKEDIN_CLIENT_SECRET,
     }
 
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    res = requests.post(token_url, data=payload, headers=headers)
+
+    print("➡️ Sending POST to LinkedIn token endpoint:")
+    print(json.dumps(payload, indent=2))
+    print("============================================================\n")
+
+    res = requests.post(TOKEN_URL, data=payload, headers=headers)
+    print(f"⬅️ LinkedIn token response status: {res.status_code}")
+    print(f"Response body:\n{res.text}\n")
 
     if res.status_code != 200:
-        print("LinkedIn token error:", res.text)
-        raise HTTPException(status_code=400, detail=res.json())
+        raise HTTPException(status_code=res.status_code, detail=res.text)
 
     token_data = res.json()
     access_token = token_data.get("access_token")
-
+    print("access_token:", access_token)
     if not access_token:
-        print("⚠️ No access token received from LinkedIn:", token_data)
-        raise HTTPException(status_code=400, detail="No access token received")
+        raise HTTPException(status_code=400, detail="No access token in response")
 
-    print("🔑 LINKEDIN ACCESS TOKEN:", access_token)
+    print("✅ Access Token received successfully!")
     return token_data
 
 
+# === Step 2: Retrieve LinkedIn User Info ===
 @router.get("/me")
 def get_user_info(authorization: str = Header(...)):
-    token = authorization.replace("Bearer ", "")
-    headers = {"Authorization": f"Bearer {token}"}
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
 
-    # Get profile
-    profile_res = requests.get("https://api.linkedin.com/v2/me", headers=headers)
-    print("LinkedIn profile response :", profile_res)
-    if profile_res.status_code != 200:
-        print("LinkedIn profile error:", profile_res.text)
-        raise HTTPException(status_code=profile_res.status_code, detail=profile_res.json())
-    profile_data = profile_res.json()
+    access_token = authorization.replace("Bearer ", "")
+    headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Get email
-    email_res = requests.get(
-        "https://api.linkedin.com/v2/emailAddress?q=members&projection=(elements*(handle~))",
-        headers=headers,
-    )
-    if email_res.status_code != 200:
-        print("LinkedIn email error:", email_res.text)
-        raise HTTPException(status_code=email_res.status_code, detail=email_res.json())
-    email_data = email_res.json()
+    print("\n=================== LINKEDIN USER DEBUG ===================")
+    print(f"Authorization header: {authorization}")
+    print("============================================================\n")
 
-    email_address = email_data.get("elements", [{}])[0].get("handle~", {}).get("emailAddress")
+    res = requests.get(USERINFO_URL, headers=headers)
+    print(f"⬅️ LinkedIn /userinfo status: {res.status_code}")
+    print(f"Response:\n{res.text}\n")
 
-    linkedin_id = profile_data.get("id")
-    full_name = f"{profile_data.get('localizedFirstName', '')} {profile_data.get('localizedLastName', '')}".strip()
+    if res.status_code == 401:
+        raise HTTPException(status_code=401, detail="Access token invalid or revoked")
+    elif res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail=res.text)
 
-    # ✅ Generate person URN
-    person_urn = f"urn:li:person:{linkedin_id}" if linkedin_id else None
+    data = res.json()
 
+    user_id = data.get("sub")
+    person_urn = f"urn:li:person:{user_id}"
+    
+    set_credentials(access_token, person_urn)
+    # ✅ Extract and return essential user info
     return {
-        "id": linkedin_id,
-        "person_urn": person_urn,
-        "name": full_name,
-        "email": email_address,
+        "id": data.get("sub"),
+        "name": data.get("name"),
+        "email": data.get("email"),
+        "picture": data.get("picture"),
+        "locale": data.get("locale"),
     }

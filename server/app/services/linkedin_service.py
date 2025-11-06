@@ -1,7 +1,6 @@
 import json
 import requests
 from langchain.tools import tool
-from app.utils.config import LINKEDIN_ACCESS_TOKEN, LINKEDIN_PERSON_URN
 from app.utils.logger import get_logger
 from app.utils.constants import (
     LINKEDIN_MISSING_CREDENTIALS,
@@ -13,6 +12,7 @@ from app.utils.constants import (
     REGISTER_UPLOAD_URL,
     LINKEDIN_POST_API_URL,
 )
+from app.services.Linkedin_credentials import get_credentials
 
 logger = get_logger(__name__)
 
@@ -26,8 +26,13 @@ def upload_media_to_linkedin(file_path: str) -> str | None:
     Returns:
         str | None: LinkedIn asset URN if successful, else None.
     """
+    access_token, person_urn = get_credentials()
+    if not access_token or not person_urn:
+        logger.error("❌ LinkedIn credentials not set!")
+        return None
+    
     headers = {
-        "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "X-Restli-Protocol-Version": "2.0.0"
     }
@@ -35,7 +40,7 @@ def upload_media_to_linkedin(file_path: str) -> str | None:
     payload = {
         "registerUploadRequest": {
             "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-            "owner": LINKEDIN_PERSON_URN,
+            "owner": person_urn,
             "serviceProvider": "LBA"
         }
     }
@@ -54,7 +59,7 @@ def upload_media_to_linkedin(file_path: str) -> str | None:
         # Step 2: Upload image
         with open(file_path, "rb") as f:
             upload_response = requests.post(upload_url, data=f, headers={
-                "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}"
+                "Authorization": f"Bearer {access_token}"
             })
             upload_response.raise_for_status()
 
@@ -82,18 +87,18 @@ def post_to_linkedin(post_content: str, image_asset_urn: str | None = None) -> s
     Returns:
         str: Status message of the operation.
     """
-    if not LINKEDIN_ACCESS_TOKEN or not LINKEDIN_PERSON_URN:
-        logger.error(LINKEDIN_MISSING_CREDENTIALS)
-        return LINKEDIN_MISSING_CREDENTIALS
+    access_token, person_urn = get_credentials()
+    if not access_token or not person_urn:
+        return "Missing LinkedIn credentials"       
 
     headers = {
-        "Authorization": f"Bearer {LINKEDIN_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "X-Restli-Protocol-Version": "2.0.0"
     }
 
     payload = {
-        "author": LINKEDIN_PERSON_URN,
+        "author": person_urn,
         "lifecycleState": "PUBLISHED",
         "specificContent": {
             "com.linkedin.ugc.ShareContent": {
